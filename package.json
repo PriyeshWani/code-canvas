@@ -1,0 +1,14 @@
+{
+  "name": "code-canvas",
+  "version": "1.0.0",
+  "description": "Visual system design tool for codebases",
+  "main": "src/api/server.js",
+  "scripts": {
+    "start": "node src/api/server.js",
+    "dev": "node src/api/server.js",
+    "build:frontend": "cd frontend && npm install && npm run build"
+  },
+  "dependencies": {
+    "ws": "^8.14.0"
+  }
+}
