@@ -216,16 +216,21 @@ export default function App() {
   }, []);
 
   // Fetch nodes for current LOD
-  const fetchNodes = useCallback(async (lodLevel, parentId = null) => {
+  const fetchNodes = useCallback(async (lodLevel, parentId = null, mode = null) => {
+    const useMode = mode || analysisMode;
     try {
       const params = new URLSearchParams({ lod: lodLevel });
       if (parentId) params.append('parent', parentId);
       
-      const res = await fetch(`/api/nodes?${params}`);
+      // Use LLM endpoint if in LLM mode
+      const endpoint = useMode === 'llm' ? '/api/llm/nodes' : '/api/nodes';
+      const res = await fetch(`${endpoint}?${params}`);
       const data = await res.json();
       
       if (data.error) {
         console.error(data.error);
+        setNotification({ type: 'error', message: '❌ ' + data.error });
+        setTimeout(() => setNotification(null), 5000);
         return;
       }
       
@@ -253,8 +258,10 @@ export default function App() {
       setFocusedNode(parentId);
     } catch (err) {
       console.error('Failed to fetch nodes:', err);
+      setNotification({ type: 'error', message: '❌ ' + err.message });
+      setTimeout(() => setNotification(null), 5000);
     }
-  }, []);
+  }, [analysisMode]);
 
   // Analyze codebase
   const handleAnalyze = async () => {

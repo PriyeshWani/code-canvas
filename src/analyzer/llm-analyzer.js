@@ -480,6 +480,381 @@ Return ONLY the JSON.`;
     
     return { nodes, edges, analysis: this.analysis };
   }
+
+  // Build prompt for drilling into a component (LOD3)
+  buildSubSystemPrompt(component) {
+    const fileContents = component.files?.slice(0, 10).map(filePath => {
+      const file = this.files.find(f => f.path === filePath || f.path.includes(filePath));
+      return file ? `### ${file.path}\n\`\`\`\n${file.content.slice(0, 3000)}\n\`\`\`` : '';
+    }).filter(Boolean).join('\n\n');
+
+    return `Analyze this component and identify its sub-systems/modules:
+
+## Component: ${component.name}
+**Type:** ${component.type}
+**Description:** ${component.description}
+
+## Files
+${fileContents || 'No files available'}
+
+## Task
+Identify the sub-systems or modules within this component. Return JSON:
+
+\`\`\`json
+{
+  "subSystems": [
+    {
+      "id": "unique_id",
+      "name": "Sub-system Name",
+      "description": "What it does",
+      "files": ["file1.js", "file2.js"],
+      "features": ["feature1", "feature2"]
+    }
+  ]
+}
+\`\`\`
+
+Return ONLY the JSON.`;
+  }
+
+  // Build prompt for analyzing classes/modules (LOD2)
+  buildClassesPrompt(subSystem, fileContents) {
+    return `Analyze these files and identify classes, modules, and their relationships:
+
+## Sub-system: ${subSystem.name}
+**Description:** ${subSystem.description}
+
+## Files
+${Object.entries(fileContents).map(([path, content]) => 
+  `### ${path}\n\`\`\`\n${content.slice(0, 4000)}\n\`\`\``
+).join('\n\n')}
+
+## Task
+Identify classes, modules, and functions. Return JSON:
+
+\`\`\`json
+{
+  "classes": [
+    {
+      "id": "unique_id",
+      "name": "ClassName or moduleName",
+      "type": "class|function|module|component",
+      "description": "What it does",
+      "file": "path/to/file.js",
+      "methods": ["method1", "method2"],
+      "properties": ["prop1", "prop2"]
+    }
+  ],
+  "relationships": [
+    { "from": "id1", "to": "id2", "type": "imports|extends|uses" }
+  ]
+}
+\`\`\`
+
+Return ONLY the JSON.`;
+  }
+
+  // Build prompt for analyzing methods/properties (LOD1)
+  buildMethodsPrompt(classInfo, fileContent) {
+    return `Analyze this class/module in detail:
+
+## Class: ${classInfo.name}
+**Type:** ${classInfo.type}
+**File:** ${classInfo.file}
+
+## Code
+\`\`\`
+${fileContent.slice(0, 8000)}
+\`\`\`
+
+## Task
+Extract all methods and properties with descriptions. Return JSON:
+
+\`\`\`json
+{
+  "methods": [
+    {
+      "name": "methodName",
+      "description": "What it does",
+      "params": ["param1", "param2"],
+      "returns": "return type or description"
+    }
+  ],
+  "properties": [
+    {
+      "name": "propName",
+      "description": "What it stores",
+      "type": "string|number|object|etc"
+    }
+  ]
+}
+\`\`\`
+
+Return ONLY the JSON.`;
+  }
+
+  // Analyze sub-systems within a component (LOD3)
+  async analyzeSubSystems(componentId) {
+    const component = this.analysis?.components?.find(c => c.id === componentId);
+    if (!component) throw new Error(`Component not found: ${componentId}`);
+
+    console.log(`🔍 Analyzing sub-systems for: ${component.name}`);
+    const prompt = this.buildSubSystemPrompt(component);
+    const response = await this.callLLM(prompt);
+    const result = this.parseJSON(response);
+
+    // Store sub-systems in analysis
+    if (!this.analysis.subSystems) this.analysis.subSystems = {};
+    this.analysis.subSystems[componentId] = result.subSystems || [];
+
+    return result.subSystems || [];
+  }
+
+  // Analyze classes within a sub-system (LOD2)
+  async analyzeClasses(componentId, subSystemId) {
+    const subSystems = this.analysis?.subSystems?.[componentId];
+    const subSystem = subSystems?.find(s => s.id === subSystemId);
+    if (!subSystem) throw new Error(`Sub-system not found: ${subSystemId}`);
+
+    console.log(`🔍 Analyzing classes for: ${subSystem.name}`);
+    
+    // Get file contents
+    const fileContents = {};
+    for (const filePath of (subSystem.files || []).slice(0, 5)) {
+      const file = this.files.find(f => f.path === filePath || f.path.includes(filePath));
+      if (file) fileContents[file.path] = file.content;
+    }
+
+    const prompt = this.buildClassesPrompt(subSystem, fileContents);
+    const response = await this.callLLM(prompt);
+    const result = this.parseJSON(response);
+
+    // Store classes in analysis
+    if (!this.analysis.classes) this.analysis.classes = {};
+    this.analysis.classes[subSystemId] = result.classes || [];
+    if (!this.analysis.classRelationships) this.analysis.classRelationships = {};
+    this.analysis.classRelationships[subSystemId] = result.relationships || [];
+
+    return result;
+  }
+
+  // Analyze methods within a class (LOD1)
+  async analyzeMethods(classId) {
+    // Find the class in any sub-system
+    let classInfo = null;
+    for (const classes of Object.values(this.analysis?.classes || {})) {
+      classInfo = classes.find(c => c.id === classId);
+      if (classInfo) break;
+    }
+    if (!classInfo) throw new Error(`Class not found: ${classId}`);
+
+    console.log(`🔍 Analyzing methods for: ${classInfo.name}`);
+    
+    // Get file content
+    const file = this.files.find(f => f.path === classInfo.file || f.path.includes(classInfo.file));
+    const fileContent = file?.content || '';
+
+    const prompt = this.buildMethodsPrompt(classInfo, fileContent);
+    const response = await this.callLLM(prompt);
+    const result = this.parseJSON(response);
+
+    // Store detailed info
+    if (!this.analysis.methodDetails) this.analysis.methodDetails = {};
+    this.analysis.methodDetails[classId] = result;
+
+    return result;
+  }
+
+  // Get nodes for any LOD level
+  async getNodesForLOD(lod, parentId = null) {
+    const nodes = [];
+    const edges = [];
+
+    if (lod === 4) {
+      return this.toFlowFormat(4);
+    }
+
+    if (lod === 3) {
+      // Sub-systems within a component
+      if (!parentId) throw new Error('parentId required for LOD3');
+      
+      let subSystems = this.analysis?.subSystems?.[parentId];
+      if (!subSystems) {
+        subSystems = await this.analyzeSubSystems(parentId);
+      }
+
+      const cols = Math.min(subSystems.length, 3);
+      subSystems.forEach((ss, i) => {
+        nodes.push({
+          id: ss.id,
+          type: 'subsystem',
+          position: { x: 50 + (i % cols) * 280, y: 50 + Math.floor(i / cols) * 220 },
+          data: {
+            label: ss.name,
+            description: ss.description,
+            icon: '📦',
+            fileCount: ss.files?.length || 0,
+            features: ss.features || [],
+            hasChildren: true,
+          },
+        });
+      });
+
+      return { nodes, edges };
+    }
+
+    if (lod === 2) {
+      // Classes within a sub-system
+      if (!parentId) throw new Error('parentId required for LOD2');
+      
+      // Find which component this sub-system belongs to
+      let classes = null;
+      let relationships = [];
+      for (const [compId, subs] of Object.entries(this.analysis?.subSystems || {})) {
+        if (subs.some(s => s.id === parentId)) {
+          classes = this.analysis?.classes?.[parentId];
+          relationships = this.analysis?.classRelationships?.[parentId] || [];
+          if (!classes) {
+            const result = await this.analyzeClasses(compId, parentId);
+            classes = result.classes || [];
+            relationships = result.relationships || [];
+          }
+          break;
+        }
+      }
+
+      if (!classes) classes = [];
+
+      const cols = Math.min(classes.length, 3);
+      classes.forEach((cls, i) => {
+        nodes.push({
+          id: cls.id,
+          type: 'class',
+          position: { x: 50 + (i % cols) * 260, y: 50 + Math.floor(i / cols) * 180 },
+          data: {
+            label: cls.name,
+            classType: cls.type,
+            methodCount: cls.methods?.length || 0,
+            propertyCount: cls.properties?.length || 0,
+            methods: cls.methods?.slice(0, 5) || [],
+            hasChildren: true,
+          },
+        });
+      });
+
+      relationships.forEach((rel, i) => {
+        edges.push({
+          id: `rel_${i}`,
+          source: rel.from,
+          target: rel.to,
+          label: rel.type,
+          type: 'smoothstep',
+        });
+      });
+
+      return { nodes, edges };
+    }
+
+    if (lod === 1) {
+      // Methods within a class
+      if (!parentId) throw new Error('parentId required for LOD1');
+
+      let details = this.analysis?.methodDetails?.[parentId];
+      if (!details) {
+        details = await this.analyzeMethods(parentId);
+      }
+
+      // Find class info
+      let classInfo = null;
+      for (const classes of Object.values(this.analysis?.classes || {})) {
+        classInfo = classes.find(c => c.id === parentId);
+        if (classInfo) break;
+      }
+
+      // Class detail node
+      nodes.push({
+        id: parentId,
+        type: 'classDetail',
+        position: { x: 50, y: 50 },
+        data: {
+          label: classInfo?.name || parentId,
+          classType: classInfo?.type || 'class',
+          methods: details.methods?.map(m => m.name) || [],
+          properties: details.properties?.map(p => p.name) || [],
+        },
+      });
+
+      // Method nodes
+      const methods = details.methods || [];
+      methods.forEach((method, i) => {
+        const methodId = `${parentId}_method_${i}`;
+        nodes.push({
+          id: methodId,
+          type: 'method',
+          position: { x: 350 + (i % 4) * 180, y: 50 + Math.floor(i / 4) * 70 },
+          data: { 
+            label: method.name,
+            description: method.description,
+          },
+        });
+        edges.push({
+          id: `edge_${methodId}`,
+          source: parentId,
+          target: methodId,
+          type: 'smoothstep',
+        });
+      });
+
+      // Property nodes
+      const props = details.properties || [];
+      const propStartY = 50 + Math.ceil(methods.length / 4) * 70 + 50;
+      props.forEach((prop, i) => {
+        const propId = `${parentId}_prop_${i}`;
+        nodes.push({
+          id: propId,
+          type: 'property',
+          position: { x: 350 + (i % 4) * 180, y: propStartY + Math.floor(i / 4) * 60 },
+          data: { 
+            label: prop.name,
+            description: prop.description,
+          },
+        });
+        edges.push({
+          id: `edge_${propId}`,
+          source: parentId,
+          target: propId,
+          type: 'smoothstep',
+          style: { strokeDasharray: '5,5' },
+        });
+      });
+
+      return { nodes, edges };
+    }
+
+    if (lod === 0) {
+      // Code view - find the file
+      let classInfo = null;
+      for (const classes of Object.values(this.analysis?.classes || {})) {
+        classInfo = classes.find(c => c.id === parentId);
+        if (classInfo) break;
+      }
+
+      if (classInfo) {
+        const file = this.files.find(f => f.path === classInfo.file || f.path.includes(classInfo.file));
+        return {
+          nodes: [],
+          edges: [],
+          code: file?.content || '',
+          className: classInfo.name,
+          filePath: classInfo.file,
+        };
+      }
+
+      return { nodes: [], edges: [], code: null };
+    }
+
+    return { nodes, edges };
+  }
   
   getGroupForType(type) {
     const mapping = {

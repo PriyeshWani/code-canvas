@@ -175,15 +175,23 @@ const server = http.createServer(async (req, res) => {
   // Get LLM nodes (uses LLM analysis results)
   if (pathname === '/api/llm/nodes' && req.method === 'GET') {
     const lod = parseInt(url.searchParams.get('lod') || '4');
+    const parentId = url.searchParams.get('parent') || null;
     
     if (!store.llmAnalyzer) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'No LLM analysis. Call /api/llm/analyze first.' }));
     }
     
-    const result = store.llmAnalyzer.toFlowFormat(lod);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(result));
+    try {
+      // For LOD < 4, we need to make additional LLM calls
+      const result = await store.llmAnalyzer.getNodesForLOD(lod, parentId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(result));
+    } catch (err) {
+      console.error('LLM nodes error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: err.message }));
+    }
   }
 
   // Analyze codebase (semantic)
