@@ -2,7 +2,6 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import ReactFlow, {
   Background,
   Controls,
-  MiniMap,
   useNodesState,
   useEdgesState,
   addEdge,
@@ -601,19 +600,6 @@ Please implement the requested changes. Provide complete, working code that addr
               >
                 <Background color="#2a2a4a" gap={20} />
                 <Controls />
-                <MiniMap 
-                  nodeColor={(n) => {
-                    switch (n.type) {
-                      case 'architecture': return '#8b5cf6';
-                      case 'subsystem': return '#0ea5e9';
-                      case 'class': return '#22c55e';
-                      case 'classDetail': return '#22c55e';
-                      case 'method': return '#f59e0b';
-                      case 'property': return '#ef4444';
-                      default: return '#666';
-                    }
-                  }}
-                />
               </ReactFlow>
             )}
           </div>
