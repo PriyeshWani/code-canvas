@@ -162,6 +162,48 @@ code-canvas/
 | HTML | ✅ (scripts) | ✅ | — |
 | Vue/Svelte | ✅ | ✅ | ✅ |
 
+## LLM Analysis Mode (Experimental)
+
+Code Canvas supports AI-powered architecture analysis using your preferred LLM.
+
+### Option 1: Direct API
+
+Configure your LLM provider via the API:
+
+```bash
+# Set provider (anthropic, openai, google, ollama)
+curl -X POST http://localhost:3002/api/llm/config \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "anthropic", "apiKey": "sk-..."}'
+
+# Run LLM analysis
+curl -X POST http://localhost:3002/api/llm/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/workspace"}'
+```
+
+### Option 2: Agent Relay (Use Your Coding Agent)
+
+Connect your existing coding agent (Claude Code, Cursor, Codex) to Code Canvas:
+
+```bash
+# In one terminal, run the relay script
+node agent-relay.js ws://localhost:3002
+
+# The relay connects to Code Canvas and waits for prompts
+# When Code Canvas needs LLM analysis, it sends prompts through the relay
+# Your agent processes them and sends responses back
+```
+
+This lets you use whatever LLM your coding agent is configured with — no extra API keys needed!
+
+### How It Works
+
+1. **Quick Scan** — Reads file tree and key files (README, package.json, entry points)
+2. **LLM Inference** — Asks the LLM to identify architecture patterns and components
+3. **Smart Deep Dive** — For uncertain areas, reads more files and asks follow-up questions
+4. **Diagram Generation** — Converts LLM's understanding to visual nodes
+
 ## Contributing
 
 PRs welcome! Some ideas:

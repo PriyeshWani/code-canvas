@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const { SemanticAnalyzer } = require('../analyzer/semantic');
+const { LLMAnalyzer } = require('../analyzer/llm-analyzer');
 
 const PORT = process.env.PORT || 3002;
 const FRONTEND_DIR = path.join(__dirname, '../../frontend/dist');
@@ -15,12 +16,24 @@ const FRONTEND_DIR = path.join(__dirname, '../../frontend/dist');
 // Store
 const store = {
   analyzer: null,
+  llmAnalyzer: null,
   analysis: null,
   currentLod: 4,
   focusedNode: null,  // For zoom-based navigation
   comments: [],
   customConnections: [],
+  analysisMode: 'semantic', // 'semantic' or 'llm'
+  llmConfig: {
+    provider: 'relay',  // 'anthropic', 'openai', 'google', 'ollama', 'relay'
+    apiKey: null,
+    baseUrl: null,
+    model: null,
+  },
 };
+
+// Agent relay connections (for Option C)
+const agentRelays = new Map(); // ws -> { id, pendingPrompts: Map<promptId, callback> }
+let promptIdCounter = 0;
 
 // WebSocket clients
 const clients = new Set();
@@ -73,7 +86,107 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ status: 'ok', service: 'code-canvas-v2' }));
   }
 
-  // Analyze codebase
+  // Get/Set LLM config
+  if (pathname === '/api/llm/config' && req.method === 'GET') {
+    const agents = Array.from(agentRelays.values()).map(a => a.id);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      provider: store.llmConfig.provider,
+      hasApiKey: !!store.llmConfig.apiKey,
+      baseUrl: store.llmConfig.baseUrl,
+      model: store.llmConfig.model,
+      connectedAgents: agents,
+    }));
+  }
+
+  if (pathname === '/api/llm/config' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (body.provider) store.llmConfig.provider = body.provider;
+    if (body.apiKey !== undefined) store.llmConfig.apiKey = body.apiKey;
+    if (body.baseUrl !== undefined) store.llmConfig.baseUrl = body.baseUrl;
+    if (body.model !== undefined) store.llmConfig.model = body.model;
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true, provider: store.llmConfig.provider }));
+  }
+
+  // LLM-based analysis
+  if (pathname === '/api/llm/analyze' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const targetPath = body.path || '/workspace';
+    
+    // Check if relay mode and no agent connected
+    if (store.llmConfig.provider === 'relay' && agentRelays.size === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ 
+        error: 'No agent connected. Connect your coding agent via WebSocket first.',
+        hint: 'Use the agent relay script or configure an API provider.',
+      }));
+    }
+    
+    try {
+      broadcast({ type: 'llm_analysis_started', data: { path: targetPath } });
+      
+      // Create relay callback if using relay mode
+      const relayCallback = store.llmConfig.provider === 'relay' 
+        ? (prompt, cb) => sendToRelay(prompt, cb)
+        : null;
+      
+      store.llmAnalyzer = new LLMAnalyzer(targetPath, {
+        provider: store.llmConfig.provider,
+        apiKey: store.llmConfig.apiKey,
+        baseUrl: store.llmConfig.baseUrl,
+        model: store.llmConfig.model,
+        relayCallback,
+      });
+      
+      const analysis = await store.llmAnalyzer.analyze();
+      store.analysis = analysis;
+      store.analysisMode = 'llm';
+      store.currentLod = 4;
+      store.focusedNode = null;
+      
+      // Also create a semantic analyzer for LOD navigation
+      store.analyzer = new SemanticAnalyzer(targetPath);
+      store.analyzer.scanFiles();
+      
+      broadcast({ type: 'llm_analysis_complete', data: { 
+        components: analysis.components?.length || 0,
+        pattern: analysis.pattern,
+      }});
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        success: true,
+        mode: 'llm',
+        name: analysis.name,
+        description: analysis.description,
+        pattern: analysis.pattern,
+        components: analysis.components?.length || 0,
+      }));
+    } catch (err) {
+      console.error('LLM Analysis error:', err);
+      broadcast({ type: 'llm_analysis_error', data: { error: err.message } });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
+  // Get LLM nodes (uses LLM analysis results)
+  if (pathname === '/api/llm/nodes' && req.method === 'GET') {
+    const lod = parseInt(url.searchParams.get('lod') || '4');
+    
+    if (!store.llmAnalyzer) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'No LLM analysis. Call /api/llm/analyze first.' }));
+    }
+    
+    const result = store.llmAnalyzer.toFlowFormat(lod);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(result));
+  }
+
+  // Analyze codebase (semantic)
   if (pathname === '/api/analyze' && req.method === 'POST') {
     const body = await parseBody(req);
     const targetPath = body.path || '/workspace';
@@ -371,11 +484,67 @@ wss.on('connection', (ws) => {
       analyzed: !!store.analyzer,
       lod: store.currentLod,
       focusedNode: store.focusedNode,
+      analysisMode: store.analysisMode,
+      llmConfig: { provider: store.llmConfig.provider },
     }
   }));
   
-  ws.on('close', () => clients.delete(ws));
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      
+      // Agent registering as relay
+      if (msg.type === 'agent_register') {
+        const agentId = msg.agentId || `agent_${Date.now()}`;
+        agentRelays.set(ws, { id: agentId, pendingPrompts: new Map() });
+        ws.send(JSON.stringify({ type: 'agent_registered', agentId }));
+        broadcast({ type: 'agent_connected', agentId });
+        console.log(`🤖 Agent connected: ${agentId}`);
+      }
+      
+      // Agent responding to prompt
+      if (msg.type === 'agent_response') {
+        const relay = agentRelays.get(ws);
+        if (relay && relay.pendingPrompts.has(msg.promptId)) {
+          const callback = relay.pendingPrompts.get(msg.promptId);
+          relay.pendingPrompts.delete(msg.promptId);
+          callback(msg.response, msg.error);
+        }
+      }
+    } catch (e) {
+      console.error('WebSocket message error:', e);
+    }
+  });
+  
+  ws.on('close', () => {
+    clients.delete(ws);
+    if (agentRelays.has(ws)) {
+      const agent = agentRelays.get(ws);
+      console.log(`🤖 Agent disconnected: ${agent.id}`);
+      broadcast({ type: 'agent_disconnected', agentId: agent.id });
+      agentRelays.delete(ws);
+    }
+  });
 });
+
+// Helper: Send prompt to relay agent
+function sendToRelay(prompt, callback) {
+  const agents = Array.from(agentRelays.entries());
+  if (agents.length === 0) {
+    callback(null, 'No agent connected');
+    return;
+  }
+  
+  const [ws, agent] = agents[0]; // Use first connected agent
+  const promptId = `prompt_${++promptIdCounter}`;
+  
+  agent.pendingPrompts.set(promptId, callback);
+  ws.send(JSON.stringify({
+    type: 'prompt_request',
+    promptId,
+    prompt,
+  }));
+}
 
 server.listen(PORT, () => {
   console.log(`Code Canvas v2 running on http://localhost:${PORT}`);
@@ -385,10 +554,18 @@ server.listen(PORT, () => {
   console.log(`  2 - Classes (with relationships)`);
   console.log(`  1 - Class Details (methods, properties)`);
   console.log(`  0 - Code View`);
-  console.log(`\nAPI:`);
-  console.log(`  POST /api/analyze      - Analyze codebase`);
+  console.log(`\nSemantic Analysis API:`);
+  console.log(`  POST /api/analyze      - Analyze codebase (semantic)`);
   console.log(`  GET  /api/nodes?lod=N  - Get nodes for LOD`);
   console.log(`  POST /api/zoom-in      - Zoom into node`);
   console.log(`  POST /api/zoom-out     - Zoom out`);
   console.log(`  GET  /api/code?nodeId  - Get code for node`);
+  console.log(`\nLLM Analysis API:`);
+  console.log(`  GET  /api/llm/config   - Get LLM config`);
+  console.log(`  POST /api/llm/config   - Set LLM provider/key`);
+  console.log(`  POST /api/llm/analyze  - Analyze with LLM`);
+  console.log(`  GET  /api/llm/nodes    - Get LLM analysis nodes`);
+  console.log(`\nAgent Relay (WebSocket):`);
+  console.log(`  Connect and send: { type: "agent_register", agentId: "my-agent" }`);
+  console.log(`  Respond to prompts: { type: "agent_response", promptId, response }`);
 });
