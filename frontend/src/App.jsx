@@ -164,9 +164,12 @@ export default function App() {
   
   // LLM Analysis state
   const [analysisMode, setAnalysisMode] = useState('semantic'); // 'semantic' or 'llm'
-  const [llmProvider, setLlmProvider] = useState('relay');
+  const [llmProvider, setLlmProvider] = useState('anthropic');
   const [agentConnected, setAgentConnected] = useState(false);
   const [llmResult, setLlmResult] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeySet, setApiKeySet] = useState(false);
 
   // WebSocket for real-time notifications
   useEffect(() => {
@@ -210,6 +213,7 @@ export default function App() {
     fetch('/api/llm/config').then(r => r.json()).then(data => {
       if (data.connectedAgents?.length > 0) setAgentConnected(true);
       if (data.provider) setLlmProvider(data.provider);
+      if (data.hasApiKey) setApiKeySet(true);
     }).catch(() => {});
     
     return () => ws.close();
@@ -587,11 +591,28 @@ Please implement the requested changes. Provide complete, working code that addr
               color: analysisMode === 'llm' ? 'white' : '#888',
             }}
           >
-            🧠 LLM {agentConnected && '●'}
+            🧠 LLM {apiKeySet ? '✓' : agentConnected ? '●' : ''}
           </button>
+          {analysisMode === 'llm' && (
+            <button
+              onClick={() => setShowSettings(true)}
+              style={{
+                padding: '6px 10px',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '12px',
+                background: 'transparent',
+                color: '#888',
+              }}
+              title="LLM Settings"
+            >
+              ⚙️
+            </button>
+          )}
         </div>
         
-        <button onClick={handleAnalyze} disabled={loading}>
+        <button onClick={handleAnalyze} disabled={loading || (analysisMode === 'llm' && !apiKeySet && !agentConnected)}>
           {loading ? '⏳ Analyzing...' : '🔍 Analyze'}
         </button>
         
@@ -830,6 +851,121 @@ Please implement the requested changes. Provide complete, working code that addr
             </button>
           )}
           <button onClick={() => setNotification(null)}>✕</button>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="prompt-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '450px' }}>
+            <div className="modal-header">
+              <h2>⚙️ LLM Settings</h2>
+              <button onClick={() => setShowSettings(false)}>✕</button>
+            </div>
+            <div className="modal-body" style={{ padding: '20px' }}>
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', marginBottom: '8px', color: '#aaa', fontSize: '14px' }}>
+                  Provider
+                </label>
+                <select 
+                  value={llmProvider}
+                  onChange={(e) => setLlmProvider(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '10px',
+                    borderRadius: '6px',
+                    border: '1px solid #333',
+                    background: '#1a1a2e',
+                    color: 'white',
+                    fontSize: '14px',
+                  }}
+                >
+                  <option value="anthropic">Anthropic (Claude)</option>
+                  <option value="openai">OpenAI (GPT-4)</option>
+                  <option value="google">Google (Gemini)</option>
+                  <option value="ollama">Ollama (Local)</option>
+                  <option value="relay">Agent Relay</option>
+                </select>
+              </div>
+              
+              {llmProvider !== 'relay' && (
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={{ display: 'block', marginBottom: '8px', color: '#aaa', fontSize: '14px' }}>
+                    API Key {apiKeySet && <span style={{ color: '#22c55e' }}>✓ Set</span>}
+                  </label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={apiKeySet ? '••••••••••••••••' : 'Enter your API key...'}
+                    style={{
+                      width: '100%',
+                      padding: '10px',
+                      borderRadius: '6px',
+                      border: '1px solid #333',
+                      background: '#1a1a2e',
+                      color: 'white',
+                      fontSize: '14px',
+                    }}
+                  />
+                  <p style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+                    {llmProvider === 'anthropic' && 'Get your key at console.anthropic.com'}
+                    {llmProvider === 'openai' && 'Get your key at platform.openai.com'}
+                    {llmProvider === 'google' && 'Get your key at makersuite.google.com'}
+                    {llmProvider === 'ollama' && 'Make sure Ollama is running locally'}
+                  </p>
+                </div>
+              )}
+              
+              {llmProvider === 'relay' && (
+                <div style={{ padding: '15px', background: '#1a1a2e', borderRadius: '8px', marginBottom: '20px' }}>
+                  <p style={{ color: '#aaa', fontSize: '13px', margin: 0 }}>
+                    {agentConnected 
+                      ? '🟢 Agent connected! Ready for analysis.'
+                      : '🔴 No agent connected. Run the relay script to connect your coding agent.'}
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="modal-actions" style={{ padding: '15px 20px', borderTop: '1px solid #333' }}>
+              <button 
+                onClick={async () => {
+                  if (llmProvider !== 'relay' && apiKey) {
+                    try {
+                      const res = await fetch('/api/llm/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider: llmProvider, apiKey }),
+                      });
+                      const data = await res.json();
+                      if (data.success) {
+                        setApiKeySet(true);
+                        setApiKey('');
+                        setNotification({ type: 'success', message: '✅ API key saved!' });
+                        setTimeout(() => setNotification(null), 3000);
+                      }
+                    } catch (e) {
+                      setNotification({ type: 'error', message: '❌ Failed to save' });
+                      setTimeout(() => setNotification(null), 3000);
+                    }
+                  } else if (llmProvider === 'relay') {
+                    try {
+                      await fetch('/api/llm/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider: 'relay' }),
+                      });
+                    } catch (e) {}
+                  }
+                  setShowSettings(false);
+                }}
+                className="primary"
+                style={{ width: '100%' }}
+              >
+                💾 Save Settings
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
