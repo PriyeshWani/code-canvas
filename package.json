@@ -9,6 +9,6 @@
     "build:frontend": "cd frontend && npm install && npm run build"
   },
   "dependencies": {
-    "ws": "^8.14.0"
+    "ws": "^8.19.0"
   }
 }

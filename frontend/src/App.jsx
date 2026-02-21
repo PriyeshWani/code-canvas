@@ -161,6 +161,12 @@ export default function App() {
   const [showPromptModal, setShowPromptModal] = useState(false);
   const [changeRequest, setChangeRequest] = useState('');
   const [notification, setNotification] = useState(null);
+  
+  // LLM Analysis state
+  const [analysisMode, setAnalysisMode] = useState('semantic'); // 'semantic' or 'llm'
+  const [llmProvider, setLlmProvider] = useState('relay');
+  const [agentConnected, setAgentConnected] = useState(false);
+  const [llmResult, setLlmResult] = useState(null);
 
   // WebSocket for real-time notifications
   useEffect(() => {
@@ -178,9 +184,33 @@ export default function App() {
             message: '✅ ' + msg.data.message,
             action: 'refresh',
           });
+        } else if (msg.type === 'agent_connected') {
+          setAgentConnected(true);
+          setNotification({ type: 'success', message: '🤖 Agent connected: ' + msg.agentId });
+          setTimeout(() => setNotification(null), 3000);
+        } else if (msg.type === 'agent_disconnected') {
+          setAgentConnected(false);
+          setNotification({ type: 'info', message: '🤖 Agent disconnected' });
+          setTimeout(() => setNotification(null), 3000);
+        } else if (msg.type === 'llm_analysis_started') {
+          setNotification({ type: 'info', message: '🧠 LLM analyzing codebase...' });
+        } else if (msg.type === 'llm_analysis_complete') {
+          setNotification({ type: 'success', message: '✅ LLM analysis complete!' });
+          setTimeout(() => setNotification(null), 3000);
+        } else if (msg.type === 'init') {
+          // Check if agent is already connected
+          if (msg.data?.connectedAgents?.length > 0) {
+            setAgentConnected(true);
+          }
         }
       } catch (e) {}
     };
+    
+    // Fetch initial LLM config
+    fetch('/api/llm/config').then(r => r.json()).then(data => {
+      if (data.connectedAgents?.length > 0) setAgentConnected(true);
+      if (data.provider) setLlmProvider(data.provider);
+    }).catch(() => {});
     
     return () => ws.close();
   }, []);
@@ -230,20 +260,51 @@ export default function App() {
   const handleAnalyze = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path }),
-      });
-      const data = await res.json();
-      
-      if (data.success) {
-        setAnalyzed(true);
-        setBreadcrumbs([{ lod: 4, label: 'Architecture', nodeId: null }]);
-        await fetchNodes(4);
+      if (analysisMode === 'llm') {
+        // LLM Analysis
+        const res = await fetch('/api/llm/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path }),
+        });
+        const data = await res.json();
+        
+        if (data.error) {
+          setNotification({ type: 'error', message: '❌ ' + data.error });
+          setTimeout(() => setNotification(null), 5000);
+        } else if (data.success) {
+          setAnalyzed(true);
+          setLlmResult(data);
+          setBreadcrumbs([{ lod: 4, label: data.name || 'Architecture', nodeId: null }]);
+          // Fetch LLM nodes
+          const nodesRes = await fetch('/api/llm/nodes?lod=4');
+          const nodesData = await nodesRes.json();
+          if (nodesData.nodes) {
+            const layoutedNodes = autoLayout(nodesData.nodes);
+            setNodes(layoutedNodes);
+            setEdges(nodesData.edges || []);
+          }
+        }
+      } else {
+        // Semantic Analysis
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path }),
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+          setAnalyzed(true);
+          setLlmResult(null);
+          setBreadcrumbs([{ lod: 4, label: 'Architecture', nodeId: null }]);
+          await fetchNodes(4);
+        }
       }
     } catch (err) {
       console.error('Analysis failed:', err);
+      setNotification({ type: 'error', message: '❌ Analysis failed: ' + err.message });
+      setTimeout(() => setNotification(null), 5000);
     }
     setLoading(false);
   };
@@ -490,6 +551,38 @@ Please implement the requested changes. Provide complete, working code that addr
           placeholder="Path to analyze..."
           style={{ width: '200px' }}
         />
+        
+        {/* Analysis Mode Toggle */}
+        <div className="mode-toggle" style={{ display: 'flex', alignItems: 'center', gap: '5px', background: '#1e1e3f', borderRadius: '8px', padding: '4px' }}>
+          <button 
+            onClick={() => setAnalysisMode('semantic')}
+            style={{
+              padding: '6px 12px',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontSize: '12px',
+              background: analysisMode === 'semantic' ? '#4f46e5' : 'transparent',
+              color: analysisMode === 'semantic' ? 'white' : '#888',
+            }}
+          >
+            🔬 Semantic
+          </button>
+          <button 
+            onClick={() => setAnalysisMode('llm')}
+            style={{
+              padding: '6px 12px',
+              border: 'none',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontSize: '12px',
+              background: analysisMode === 'llm' ? '#4f46e5' : 'transparent',
+              color: analysisMode === 'llm' ? 'white' : '#888',
+            }}
+          >
+            🧠 LLM {agentConnected && '●'}
+          </button>
+        </div>
         
         <button onClick={handleAnalyze} disabled={loading}>
           {loading ? '⏳ Analyzing...' : '🔍 Analyze'}
